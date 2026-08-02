@@ -1,0 +1,155 @@
+name: Release
+
+# Builds Tauri bundles for macOS (Apple Silicon + Intel), Windows, and Linux.
+#
+# - Pushing a version tag (v*) builds all targets and uploads the bundles to a
+#   DRAFT GitHub Release named after the tag — review it, edit notes, publish.
+# - `workflow_dispatch` runs the same builds WITHOUT creating a release, so the
+#   pipeline can be validated before tagging (bundles land as run artifacts).
+#
+# Bundles are currently UNSIGNED (no code-signing or updater keys are
+# configured). When those secrets exist, wire them where marked below —
+# see the "Release pipeline" item in ROADMAP.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Refuse to release a tag that disagrees with the app version.
+  verify:
+    name: Verify tag matches app version
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag with tauri.conf.json
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_CORE="${TAG_VERSION%%-*}"
+          CONF_VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          echo "tag: ${GITHUB_REF_NAME} (core ${TAG_CORE}) — tauri.conf.json: ${CONF_VERSION}"
+          if [ "$TAG_CORE" != "$CONF_VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match tauri.conf.json version ${CONF_VERSION}."
+            echo "::error::Bump the version in src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and package.json, or re-tag."
+            exit 1
+          fi
+
+  build:
+    name: Build — ${{ matrix.name }}
+    needs: verify
+    # Run when verify passed (tag) or was skipped (manual dispatch).
+    if: always() && (needs.verify.result == 'success' || needs.verify.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            runner: macos-latest
+            rust-targets: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - name: macOS (Intel)
+            runner: macos-latest
+            rust-targets: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - name: Linux (x86_64)
+            # ubuntu-latest (24.04) — bundles require its glibc or newer on
+            # users' systems. Move to an older runner image if wider
+            # compatibility becomes a priority.
+            runner: ubuntu-latest
+            rust-targets: ""
+            args: ""
+          - name: Windows (x86_64)
+            runner: windows-latest
+            rust-targets: ""
+            args: ""
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        shell: bash
+        # Same workaround as ci.yml: the scaffold's bun.lock was written by a
+        # canary bun that stable releases can't read. Resolve fresh until the
+        # lock is regenerated, then switch to `bun install --frozen-lockfile`.
+        run: |
+          rm -f bun.lock
+          bun install
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust-targets || matrix.runner }}
+
+      - name: Build bundles${{ startsWith(github.ref, 'refs/tags/') && ' and upload to draft release' || '' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- code signing / updater keys go here when configured ---------
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          # Empty tagName (manual dispatch) = build only, no release.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Starfish {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: ${{ matrix.args }}
+          releaseBody: |
+            Starfish ${{ github.ref_name }} — your Hyperagent agents behind local
+            OpenAI- and Anthropic-compatible APIs. See the README for how to
+            connect Claude Code, Codex, Cursor, and SDKs.
+
+            > ⚠️ These bundles are **not code-signed yet**. On macOS, clear the
+            > quarantine flag after installing (right-click → Open, or
+            > `xattr -d com.apple.quarantine /Applications/Starfish.app`).
+            > Windows SmartScreen will warn similarly ("More info" → "Run anyway").
+
+            Token counts reported by the gateway are estimates; streaming is
+            emulated (see MISSION.md §4). Use with your own Hyperagent
+            account(s), within its Terms of Service.
+
+      # Manual dispatch runs have no release to hold the bundles — keep them
+      # as run artifacts instead.
+      - name: Upload bundles as run artifacts (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: starfish-${{ matrix.rust-targets || runner.os }}
+          if-no-files-found: warn
+          path: |
+            target/**/release/bundle/dmg/*.dmg
+            target/**/release/bundle/macos/*.app.tar.gz
+            target/**/release/bundle/msi/*.msi
+            target/**/release/bundle/nsis/*.exe
+            target/**/release/bundle/deb/*.deb
+            target/**/release/bundle/rpm/*.rpm
+            target/**/release/bundle/appimage/*.AppImage

@@ -248,6 +248,10 @@ a Python-sidecar fallback for speed; tasks below assume the Rust-native path.
 - [ ] **App identity** — icon set, product naming pass, `identifier` review.
 - [ ] **CONTRIBUTING.md** — distill the README contributing section; PR/issue templates.
 - [ ] **Release pipeline** — tagged releases with signed bundles per OS; changelog.
+  *`release.yml` landed: v* tags build macOS (arm64 + x86_64) / Windows / Linux bundles
+  into a draft release via `tauri-action`, with a tag↔version guard and a
+  build-only `workflow_dispatch` mode. Still open: code signing (macOS/Windows),
+  updater keys, changelog automation.*
 - [ ] **Security review checklist** — keychain usage, log redaction, bind address,
   CSP for the webview, dependency audit (`cargo audit`).
 
