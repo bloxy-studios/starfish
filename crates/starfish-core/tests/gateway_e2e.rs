@@ -16,36 +16,54 @@ use starfish_core::upstream::MockUpstream;
 
 struct TestServer {
     base: String,
+    /// Key routed to acct1.
     key: String,
+    /// Key routed to acct2 — a *different* identity on the same gateway.
+    key2: String,
     handle: gateway::ServerHandle,
     state: Arc<GatewayState>,
+}
+
+fn test_account(id: &str, nickname: &str) -> AccountRecord {
+    AccountRecord {
+        id: id.into(),
+        nickname: nickname.into(),
+        base_url: "https://hyperagent.com".into(),
+        identity: None,
+        default_agent_id: Some("mock-researcher".into()),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+fn test_key(id: &str, account_id: &str) -> (String, keys::KeyRecord) {
+    let (secret, hash, hint) = keys::generate_key();
+    (
+        secret,
+        keys::KeyRecord {
+            id: id.into(),
+            name: format!("test {id}"),
+            hash,
+            hint,
+            account_id: account_id.into(),
+            default_agent_id: None,
+            disabled_tools: vec![],
+            created_at: chrono::Utc::now(),
+            last_used_at: None,
+            revoked: false,
+        },
+    )
 }
 
 async fn spawn_server() -> TestServer {
     let mut cfg = AppConfig::default();
     cfg.server.port = 0; // ephemeral
     cfg.server.poll_interval_ms = 100;
-    cfg.accounts.push(AccountRecord {
-        id: "acct1".into(),
-        nickname: "Test".into(),
-        base_url: "https://hyperagent.com".into(),
-        identity: None,
-        default_agent_id: Some("mock-researcher".into()),
-        created_at: chrono::Utc::now(),
-    });
-    let (secret, hash, hint) = keys::generate_key();
-    cfg.keys.push(keys::KeyRecord {
-        id: "key1".into(),
-        name: "test".into(),
-        hash,
-        hint,
-        account_id: "acct1".into(),
-        default_agent_id: None,
-        disabled_tools: vec![],
-        created_at: chrono::Utc::now(),
-        last_used_at: None,
-        revoked: false,
-    });
+    cfg.accounts.push(test_account("acct1", "Test"));
+    cfg.accounts.push(test_account("acct2", "Other"));
+    let (secret, record) = test_key("key1", "acct1");
+    cfg.keys.push(record);
+    let (secret2, record2) = test_key("key2", "acct2");
+    cfg.keys.push(record2);
     cfg.mappings.push(MappingRule {
         pattern: "claude-*".into(),
         surface: None,
@@ -62,6 +80,7 @@ async fn spawn_server() -> TestServer {
     TestServer {
         base,
         key: secret,
+        key2: secret2,
         handle,
         state,
     }
@@ -309,6 +328,93 @@ async fn responses_background_completes() {
         }
     }
     assert_eq!(status, "completed");
+    s.handle.stop().await;
+}
+
+#[tokio::test]
+async fn responses_are_scoped_to_the_creating_key() {
+    let s = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // key1 (acct1) starts a background run.
+    let body: Value = client
+        .post(format!("{}/v1/responses", s.base))
+        .bearer_auth(&s.key)
+        .json(&json!({
+            "model": "hyperagent-default",
+            "input": "acct1's private prompt",
+            "background": true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // key2 (a different account) must not see it — indistinguishable from a
+    // nonexistent id on read, list, and cancel.
+    for path in [
+        format!("/v1/responses/{id}"),
+        format!("/v1/responses/{id}/input_items"),
+    ] {
+        let resp = client
+            .get(format!("{}{path}", s.base))
+            .bearer_auth(&s.key2)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "GET {path} must be hidden from key2");
+        let e: Value = resp.json().await.unwrap();
+        assert_eq!(e["error"]["code"], "not_found");
+    }
+    let resp = client
+        .post(format!("{}/v1/responses/{id}/cancel", s.base))
+        .bearer_auth(&s.key2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "cancel must be hidden from key2");
+
+    // The foreign cancel attempt must not have interrupted the owner's run.
+    let mut status = String::new();
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let r: Value = client
+            .get(format!("{}/v1/responses/{id}", s.base))
+            .bearer_auth(&s.key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        status = r["status"].as_str().unwrap_or("").to_string();
+        if status == "completed" {
+            break;
+        }
+    }
+    assert_eq!(
+        status, "completed",
+        "a foreign cancel must not stop the owner's run"
+    );
+
+    // The owner keeps full access to its own response.
+    let resp = client
+        .get(format!("{}/v1/responses/{id}/input_items", s.base))
+        .bearer_auth(&s.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .post(format!("{}/v1/responses/{id}/cancel", s.base))
+        .bearer_auth(&s.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
     s.handle.stop().await;
 }
 

@@ -440,7 +440,30 @@ fn usage_object(input: u64, output: u64) -> Value {
 // Responses API (Codex's default wire API)
 // ---------------------------------------------------------------------------
 
+/// The identity a stored response belongs to — the key that created it.
+///
+/// Responses are readable/cancellable only by the identity that created them:
+/// keys route to accounts and can belong to different people sharing one
+/// Starfish (MISSION §3/§6B), so a second key must not be able to fetch or
+/// interrupt another key's run just by learning the `resp_…` id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseOwner {
+    pub account_id: String,
+    /// `None` only in dev anonymous mode.
+    pub key_id: Option<String>,
+}
+
+impl ResponseOwner {
+    pub fn of(identity: &super::auth::RouteIdentity) -> Self {
+        Self {
+            account_id: identity.account_id.clone(),
+            key_id: identity.key_id.clone(),
+        }
+    }
+}
+
 pub struct StoredResponse {
+    pub owner: ResponseOwner,
     pub response: Value,
     pub input_items: Vec<Value>,
     pub cancel: Arc<AtomicBool>,
@@ -478,19 +501,40 @@ impl ResponsesRegistry {
         }
     }
 
-    pub fn response(&self, id: &str) -> Option<Value> {
+    /// Owner-scoped read: `None` both when the id is unknown and when it
+    /// belongs to a different identity, so callers can't distinguish the two.
+    pub fn response_for(&self, id: &str, owner: &ResponseOwner) -> Option<Value> {
+        let inner = self.inner.lock().expect("registry lock");
+        inner
+            .items
+            .get(id)
+            .filter(|s| s.owner == *owner)
+            .map(|s| s.response.clone())
+    }
+
+    pub fn input_items_for(&self, id: &str, owner: &ResponseOwner) -> Option<Vec<Value>> {
+        let inner = self.inner.lock().expect("registry lock");
+        inner
+            .items
+            .get(id)
+            .filter(|s| s.owner == *owner)
+            .map(|s| s.input_items.clone())
+    }
+
+    pub fn cancel_flag_for(&self, id: &str, owner: &ResponseOwner) -> Option<Arc<AtomicBool>> {
+        let inner = self.inner.lock().expect("registry lock");
+        inner
+            .items
+            .get(id)
+            .filter(|s| s.owner == *owner)
+            .map(|s| s.cancel.clone())
+    }
+
+    /// Unscoped read for the request path that created the entry (it already
+    /// holds the freshly minted id). HTTP handlers must use `response_for`.
+    fn response_unchecked(&self, id: &str) -> Option<Value> {
         let inner = self.inner.lock().expect("registry lock");
         inner.items.get(id).map(|s| s.response.clone())
-    }
-
-    pub fn input_items(&self, id: &str) -> Option<Vec<Value>> {
-        let inner = self.inner.lock().expect("registry lock");
-        inner.items.get(id).map(|s| s.input_items.clone())
-    }
-
-    pub fn cancel_flag(&self, id: &str) -> Option<Arc<AtomicBool>> {
-        let inner = self.inner.lock().expect("registry lock");
-        inner.items.get(id).map(|s| s.cancel.clone())
     }
 }
 
@@ -705,10 +749,12 @@ pub async fn create_response(
     let mut opts = RunOptions::from_state(&state).await;
     opts.cancel = Some(cancel.clone());
 
-    // Register up-front so GET /v1/responses/{id} works during the run.
+    // Register up-front so GET /v1/responses/{id} works during the run,
+    // scoped to the identity that created it.
     state.responses.insert(
         response_id.clone(),
         StoredResponse {
+            owner: ResponseOwner::of(&identity),
             response: response_object(
                 &response_id,
                 created,
@@ -734,7 +780,7 @@ pub async fn create_response(
         let instructions2 = instructions.clone();
         let queued = state
             .responses
-            .response(&response_id)
+            .response_unchecked(&response_id)
             .expect("just inserted");
         tokio::spawn(async move {
             state2.responses.update(&response_id2, |s| {
@@ -819,7 +865,7 @@ pub async fn create_response(
             ));
             let base2 = state2
                 .responses
-                .response(&response_id)
+                .response_unchecked(&response_id)
                 .unwrap_or(Value::Null);
             let _ = tx.send(SseEvent::named(
                 "response.in_progress",
@@ -1013,23 +1059,33 @@ pub async fn create_response(
     }
 }
 
+/// Uniform 404 for ids that don't exist *or* belong to another identity —
+/// deliberately indistinguishable so foreign ids can't be probed.
+fn response_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        &format!(
+            "Response '{id}' not found for this key (Starfish keeps the last {RESPONSES_CAPACITY} in memory)."
+        ),
+    )
+}
+
 pub async fn get_response(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
     let cfg = state.config.read().await;
-    if let Err(resp) = authenticate(&cfg, &headers, Surface::Openai) {
-        return *resp;
-    }
+    let identity = match authenticate(&cfg, &headers, Surface::Openai) {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
     drop(cfg);
-    match state.responses.response(&id) {
+    let owner = ResponseOwner::of(&identity);
+    match state.responses.response_for(&id, &owner) {
         Some(r) => Json(r).into_response(),
-        None => error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("Response '{id}' not found (Starfish keeps the last {RESPONSES_CAPACITY} in memory)."),
-        ),
+        None => response_not_found(&id),
     }
 }
 
@@ -1039,11 +1095,13 @@ pub async fn cancel_response(
     Path(id): Path<String>,
 ) -> Response {
     let cfg = state.config.read().await;
-    if let Err(resp) = authenticate(&cfg, &headers, Surface::Openai) {
-        return *resp;
-    }
+    let identity = match authenticate(&cfg, &headers, Surface::Openai) {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
     drop(cfg);
-    match state.responses.cancel_flag(&id) {
+    let owner = ResponseOwner::of(&identity);
+    match state.responses.cancel_flag_for(&id, &owner) {
         Some(flag) => {
             flag.store(true, Ordering::Relaxed);
             state.responses.update(&id, |s| {
@@ -1052,13 +1110,15 @@ pub async fn cancel_response(
                     s.response["status"] = json!("cancelled");
                 }
             });
-            Json(state.responses.response(&id).unwrap_or(Value::Null)).into_response()
+            Json(
+                state
+                    .responses
+                    .response_for(&id, &owner)
+                    .unwrap_or(Value::Null),
+            )
+            .into_response()
         }
-        None => error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("Response '{id}' not found."),
-        ),
+        None => response_not_found(&id),
     }
 }
 
@@ -1068,11 +1128,13 @@ pub async fn list_response_input_items(
     Path(id): Path<String>,
 ) -> Response {
     let cfg = state.config.read().await;
-    if let Err(resp) = authenticate(&cfg, &headers, Surface::Openai) {
-        return *resp;
-    }
+    let identity = match authenticate(&cfg, &headers, Surface::Openai) {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
     drop(cfg);
-    match state.responses.input_items(&id) {
+    let owner = ResponseOwner::of(&identity);
+    match state.responses.input_items_for(&id, &owner) {
         Some(items) => {
             let data: Vec<Value> = items
                 .into_iter()
@@ -1093,11 +1155,7 @@ pub async fn list_response_input_items(
             }))
             .into_response()
         }
-        None => error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("Response '{id}' not found."),
-        ),
+        None => response_not_found(&id),
     }
 }
 
@@ -1177,27 +1235,67 @@ mod tests {
         assert_eq!(r["usage"]["total_tokens"], 15);
     }
 
+    fn owner(account: &str, key: Option<&str>) -> ResponseOwner {
+        ResponseOwner {
+            account_id: account.into(),
+            key_id: key.map(str::to_string),
+        }
+    }
+
+    fn stored(id: &str, owner: &ResponseOwner) -> StoredResponse {
+        StoredResponse {
+            owner: owner.clone(),
+            response: json!({"id": id, "status": "in_progress"}),
+            input_items: vec![json!({"type": "message", "role": "user", "content": "x"})],
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     #[test]
     fn registry_caps_and_cancels() {
         let reg = ResponsesRegistry::default();
+        let me = owner("acct1", Some("key1"));
         for i in 0..(RESPONSES_CAPACITY + 5) {
-            reg.insert(
-                format!("r{i}"),
-                StoredResponse {
-                    response: json!({"id": format!("r{i}"), "status": "in_progress"}),
-                    input_items: vec![],
-                    cancel: Arc::new(AtomicBool::new(false)),
-                },
-            );
+            reg.insert(format!("r{i}"), stored(&format!("r{i}"), &me));
         }
-        assert!(reg.response("r0").is_none());
-        assert!(reg
-            .response(&format!("r{}", RESPONSES_CAPACITY + 4))
-            .is_some());
+        assert!(reg.response_for("r0", &me).is_none());
+        let newest = format!("r{}", RESPONSES_CAPACITY + 4);
+        assert!(reg.response_for(&newest, &me).is_some());
 
-        let flag = reg
-            .cancel_flag(&format!("r{}", RESPONSES_CAPACITY + 4))
-            .unwrap();
+        let flag = reg.cancel_flag_for(&newest, &me).unwrap();
         assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn registry_scopes_reads_to_the_creating_identity() {
+        let reg = ResponsesRegistry::default();
+        let me = owner("acct1", Some("key1"));
+        reg.insert("resp_mine".into(), stored("resp_mine", &me));
+
+        // Owner sees everything.
+        assert!(reg.response_for("resp_mine", &me).is_some());
+        assert!(reg.input_items_for("resp_mine", &me).is_some());
+        assert!(reg.cancel_flag_for("resp_mine", &me).is_some());
+
+        // Another account's key sees nothing — same as a nonexistent id.
+        let other_account = owner("acct2", Some("key2"));
+        assert!(reg.response_for("resp_mine", &other_account).is_none());
+        assert!(reg.input_items_for("resp_mine", &other_account).is_none());
+        assert!(reg.cancel_flag_for("resp_mine", &other_account).is_none());
+
+        // A different key on the SAME account is still a different identity
+        // (keys can belong to different people sharing an account seat).
+        let other_key = owner("acct1", Some("key9"));
+        assert!(reg.response_for("resp_mine", &other_key).is_none());
+
+        // Anonymous (dev mode) doesn't alias a keyed identity, and vice versa.
+        let anon = owner("acct1", None);
+        assert!(reg.response_for("resp_mine", &anon).is_none());
+        reg.insert("resp_anon".into(), stored("resp_anon", &anon));
+        assert!(reg.response_for("resp_anon", &anon).is_some());
+        assert!(reg.response_for("resp_anon", &me).is_none());
+
+        // The internal unchecked read (create path only) still resolves.
+        assert!(reg.response_unchecked("resp_mine").is_some());
     }
 }
