@@ -6,7 +6,7 @@
 ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)
 ![Rust](https://img.shields.io/badge/core-Rust-DEA584?logo=rust&logoColor=white)
 ![Frontend](https://img.shields.io/badge/UI-React_+_TypeScript-3178C6?logo=typescript&logoColor=white)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
+![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
 Starfish is a cross-platform desktop app (Tauri v2) that signs in to your
 [Hyperagent](https://hyperagent.com) account(s) and serves **local OpenAI- and
@@ -183,5 +183,18 @@ complying with Hyperagent's Terms of Service and those of any client you connect
 
 ## License
 
-**TBD.** No license has been chosen yet — until one is added, all rights are reserved.
-If you'd like to contribute and the missing license blocks you, open an issue.
+Dual-licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE) (SPDX: `Apache-2.0`)
+- [MIT License](LICENSE-MIT) (SPDX: `MIT`)
+
+at your option — the same model as Tauri, the Rust toolchain, and most of the crates
+Starfish is built from.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in Starfish by you, as defined in the Apache-2.0 license, shall be
+dual-licensed as above, without any additional terms or conditions.
+
+> **Note for contributors:** the reference CLI gateway Starfish draws ideas from has
+> **no license** (all rights reserved). Ideas and wire protocols aren't copyrightable —
+> code is. Do not port code from it verbatim; everything here must be written fresh.

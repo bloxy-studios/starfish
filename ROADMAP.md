@@ -216,7 +216,9 @@ a Python-sidecar fallback for speed; tasks below assume the Rust-native path.
 
 - [ ] **CI** — `cargo fmt --check`, `clippy -D warnings`, `cargo test`, frontend
   typecheck/build; Tauri build matrix (macOS / Windows / Linux).
-- [ ] **Choose a license** — decision + `LICENSE` file (README currently says TBD).
+- [x] **Choose a license** — adopted **MIT OR Apache-2.0** dual (the Rust/Tauri
+  convention): `LICENSE-MIT` + `LICENSE-APACHE`, README badge/section, SPDX fields in
+  `Cargo.toml` / `package.json`. No code may be ported from the unlicensed reference repo.
 - [ ] **App identity** — icon set, product naming pass, `identifier` review.
 - [ ] **CONTRIBUTING.md** — distill the README contributing section; PR/issue templates.
 - [ ] **Release pipeline** — tagged releases with signed bundles per OS; changelog.

@@ -1,8 +1,10 @@
 [package]
 name = "starfish"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Desktop app that manages Hyperagent accounts and serves local OpenAI- and Anthropic-compatible API endpoints"
+authors = ["Bloxy Studios"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bloxy-studios/starfish"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
