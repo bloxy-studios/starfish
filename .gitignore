@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Rust (workspace target dir at repo root)
+/target
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

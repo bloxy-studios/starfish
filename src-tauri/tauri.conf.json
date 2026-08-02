@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "starfish",
+  "productName": "Starfish",
   "version": "0.1.0",
-  "identifier": "com.codewithabdul.starfish",
+  "identifier": "com.bloxystudios.starfish",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "starfish",
-        "width": 800,
-        "height": 600
+        "title": "Starfish",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 620
       }
     ],
     "security": {

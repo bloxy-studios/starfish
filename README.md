@@ -2,7 +2,7 @@
 
 **Your Hyperagent agents, behind the two APIs every AI tool already speaks.**
 
-![Status](https://img.shields.io/badge/status-pre--alpha_·_design_phase-orange)
+![Status](https://img.shields.io/badge/status-alpha_·_core_landed-yellow)
 ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white)
 ![Rust](https://img.shields.io/badge/core-Rust-DEA584?logo=rust&logoColor=white)
 ![Frontend](https://img.shields.io/badge/UI-React_+_TypeScript-3178C6?logo=typescript&logoColor=white)
@@ -21,10 +21,13 @@ Claude Code ─ ANTHROPIC_BASE_URL ─┤──▶  STARFISH (local gateway + GU
 Cursor / SDKs / any client ────┘        accounts · keys · model mapping · logs
 ```
 
-> **⚠️ Status: pre-alpha.** There is nothing to install yet — this repo currently holds
-> the project's design ([MISSION.md](MISSION.md)), the build plan ([ROADMAP.md](ROADMAP.md)),
-> and a bare Tauri v2 scaffold. Star/watch the repo to follow along, or grab a roadmap
-> item and help build it.
+> **⚠️ Status: alpha.** The core is implemented and tested offline: the Rust gateway
+> (both API surfaces, streaming, model mapping, local keys), OAuth 2.1 + keychain vault,
+> the MCP client, and the full desktop UI (onboarding, accounts, keys, mapping, live
+> logs, tray). What it still needs is **validation against the live Hyperagent upstream**
+> and real Codex/Claude Code end-to-end runs — the parsers are deliberately tolerant, but
+> payload shapes may need adjusting once captured (see [ROADMAP.md](ROADMAP.md) for
+> exactly which acceptance boxes remain). No packaged releases yet — build from source.
 
 ---
 
@@ -140,15 +143,33 @@ Rust in `src-tauri/` (where the gateway core will live).
 bun install
 bun run tauri dev     # dev app with hot reload
 bun run tauri build   # production bundle
+
+# Develop the UI against a fake upstream (no Hyperagent account needed):
+STARFISH_MOCK_UPSTREAM=1 bun run tauri dev
+```
+
+**Test** (core only — no desktop toolchain needed)
+
+```bash
+cargo test -p starfish-core     # unit tests + gateway e2e against the mock upstream
+cargo clippy -p starfish-core --all-targets -- -D warnings
 ```
 
 **Layout**
 
 ```text
-src/           React UI
-src-tauri/     Rust core — Tauri commands; gateway server, OAuth, MCP client will live here
-MISSION.md     the why, the architecture, the full feature set
-ROADMAP.md     the plan, checkbox by checkbox
+src/                    React UI (pages: Dashboard, Accounts, Keys, Models, Connect, Logs, Settings, Onboarding)
+src-tauri/              thin Tauri shell — commands, tray, events; no business logic
+crates/starfish-core/   the engine (Tauri-free, fully testable):
+  gateway/              axum server — auth, OpenAI surface, Anthropic surface, SSE emulation
+  oauth.rs              OAuth 2.1: discovery, DCR, PKCE, loopback callback, refresh
+  mcp.rs                JSON-RPC 2.0 over Streamable HTTP (JSON + SSE bodies)
+  hyperagent.rs         tool wrappers with defensive parsers
+  upstream.rs           Upstream trait: HyperagentUpstream + MockUpstream
+  vault.rs              OS keychain (keyring) with 0600 file fallback
+  config.rs / keys.rs / mapping.rs / logbuf.rs / estimate.rs
+MISSION.md              the why, the architecture, the full feature set
+ROADMAP.md              the plan, checkbox by checkbox
 ```
 
 ## Contributing

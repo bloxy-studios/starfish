@@ -1,0 +1,47 @@
+[package]
+name = "starfish-core"
+description = "Starfish core: local OpenAI- and Anthropic-compatible gateway backed by Hyperagent MCP (OAuth 2.1, keychain vault, model mapping)"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[features]
+# OS keychain storage via the `keyring` crate. Enabled by default; disable for
+# constrained build environments (falls back to a 0600 file vault with a warning).
+default = ["os-keychain"]
+os-keychain = ["dep:keyring"]
+
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+hyper = { version = "1", features = ["server"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde", "clock"], default-features = false }
+dirs = "5"
+url = "2"
+http = "1"
+bytes = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "tokio"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
